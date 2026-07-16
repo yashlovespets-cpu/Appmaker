@@ -1,0 +1,289 @@
+<!doctype html>
+<html>
+<head>
+<base target="_top">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #e0e2e6;
+    --text: #1c1f24;
+    --muted: #667085;
+    --accent: #3d5afe;
+    --accent-text: #ffffff;
+    --danger: #d93025;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181d;
+      --panel: #1e2127;
+      --border: #30343c;
+      --text: #edeef0;
+      --muted: #9aa1ac;
+      --accent: #5b7cfa;
+      --accent-text: #0b0d10;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header { padding: 24px 20px 8px; max-width: 960px; margin: 0 auto; }
+  header h1 { font-size: 20px; margin: 0 0 4px; }
+  header p { margin: 0; color: var(--muted); font-size: 14px; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px 20px 60px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  #uploadForm { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+  #uploadForm .field-full { grid-column: 1 / -1; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  input[type="text"], input[type="file"] {
+    font: inherit; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--bg); color: var(--text);
+  }
+  button {
+    font: inherit; cursor: pointer; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); border-radius: 6px; padding: 8px 14px;
+  }
+  button:disabled { opacity: 0.6; cursor: default; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.danger { color: var(--danger); border-color: var(--danger); }
+  #uploadForm button { grid-column: 1 / -1; justify-self: start; }
+  .toolbar { display: grid; gap: 8px; grid-template-columns: 1fr 1fr auto; align-items: end; }
+  .toolbar label { grid-column: span 1; }
+  .status { font-size: 13px; color: var(--muted); margin: 4px 2px 0; min-height: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+  .upload-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
+  .upload-card .thumb {
+    background: repeating-conic-gradient(#00000010 0% 25%, transparent 0% 50%) 50% / 16px 16px;
+    display: flex; align-items: center; justify-content: center; height: 150px;
+  }
+  .upload-card img { max-width: 100%; max-height: 150px; display: block; }
+  .upload-card .meta { padding: 10px 12px; display: grid; gap: 4px; }
+  .upload-card .meta .row { font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+  .upload-card .meta .row .k { color: var(--muted); }
+  .upload-card .meta .row .v { font-weight: 600; text-align: right; word-break: break-all; }
+  .upload-card .actions { display: flex; gap: 6px; padding: 0 12px 12px; }
+  .upload-card .actions button { flex: 1; font-size: 12px; padding: 6px 8px; }
+  .empty { color: var(--muted); font-size: 14px; padding: 20px 4px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Appmaker Image Intake</h1>
+  <p>Submit an image with its Page ID and Block Label. Uploads are stored server-side (Drive + Sheet) so they're shared across every browser that opens this page, and each one is rendered here as a <code>data:</code> URL so same-origin JS reading this tab gets the raw image bytes with no extra fetch or CORS involved.</p>
+</header>
+<main>
+  <form id="uploadForm" class="panel">
+    <label>Page ID
+      <input type="text" name="pageId" required placeholder="e.g. home">
+    </label>
+    <label>Block Label
+      <input type="text" name="blockLabel" required placeholder="e.g. hero-banner">
+    </label>
+    <label class="field-full">Image
+      <input type="file" name="image" accept="image/*" required>
+    </label>
+    <button type="submit" class="primary">Add Upload</button>
+  </form>
+
+  <div class="panel toolbar">
+    <label>Filter: Page ID
+      <input type="text" id="filterPageId" placeholder="substring match">
+    </label>
+    <label>Filter: Block Label
+      <input type="text" id="filterBlockLabel" placeholder="substring match">
+    </label>
+    <button id="refreshBtn">Refresh</button>
+  </div>
+  <div class="status" id="status"></div>
+
+  <section id="list" class="grid" aria-label="Uploaded images"></section>
+</main>
+
+<script>
+const INITIAL_FILTER = {
+  pageId: <?!= initialPageIdJson ?>,
+  blockLabel: <?!= initialBlockLabelJson ?>,
+};
+</script>
+<script>
+(function () {
+  let records = [];
+  let readyResolve;
+  const readyPromise = new Promise((resolve) => { readyResolve = resolve; });
+
+  function setStatus(text) {
+    document.getElementById('status').textContent = text;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  function currentFilter() {
+    return {
+      pageId: document.getElementById('filterPageId').value.trim(),
+      blockLabel: document.getElementById('filterBlockLabel').value.trim(),
+    };
+  }
+
+  function render() {
+    const list = document.getElementById('list');
+    if (records.length === 0) {
+      list.innerHTML = '<div class="empty">No uploads match this filter.</div>';
+      return;
+    }
+    list.innerHTML = records.map((r) => `
+      <article class="upload-card"
+                data-appmaker-upload
+                data-id="${escapeHtml(r.id)}"
+                data-page-id="${escapeHtml(r.pageId)}"
+                data-block-label="${escapeHtml(r.blockLabel)}"
+                data-file-name="${escapeHtml(r.fileName)}"
+                data-mime-type="${escapeHtml(r.mimeType)}"
+                data-created-at="${escapeHtml(r.createdAt)}"
+                data-uploaded-by="${escapeHtml(r.uploadedBy || '')}">
+        <div class="thumb">
+          <img data-role="upload-image" src="${r.imageDataUrl || ''}" alt="${escapeHtml(r.fileName)}">
+        </div>
+        <div class="meta">
+          <div class="row"><span class="k">Page ID</span><span class="v">${escapeHtml(r.pageId)}</span></div>
+          <div class="row"><span class="k">Block Label</span><span class="v">${escapeHtml(r.blockLabel)}</span></div>
+          <div class="row"><span class="k">File</span><span class="v">${escapeHtml(r.fileName)}</span></div>
+          <div class="row"><span class="k">Size</span><span class="v">${fmtBytes(r.byteLength)}</span></div>
+          <div class="row"><span class="k">By</span><span class="v">${escapeHtml(r.uploadedBy || '')}</span></div>
+        </div>
+        <div class="actions">
+          <button data-action="copy" data-id="${escapeHtml(r.id)}">Copy Data URL</button>
+          <button data-action="delete" data-id="${escapeHtml(r.id)}" class="danger">Delete</button>
+        </div>
+      </article>
+    `).join('');
+  }
+
+  function runServer(fnName, arg) {
+    return new Promise((resolve, reject) => {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler((err) => reject(err))
+        [fnName](arg);
+    });
+  }
+
+  async function loadAll(filter) {
+    setStatus('Loading…');
+    records = await runServer('listUploads', filter || {});
+    render();
+    setStatus(records.length + ' upload(s) shown.');
+    return records;
+  }
+
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result;
+        const base64Data = dataUrl.substring(dataUrl.indexOf(',') + 1);
+        resolve(base64Data);
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    const form = e.target;
+    const pageId = form.pageId.value.trim();
+    const blockLabel = form.blockLabel.value.trim();
+    const file = form.image.files[0];
+    if (!pageId || !blockLabel || !file) return;
+
+    const submitBtn = form.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    setStatus('Uploading…');
+    try {
+      const base64Data = await fileToBase64(file);
+      const record = await runServer('submitUpload', {
+        pageId, blockLabel, fileName: file.name, mimeType: file.type, base64Data,
+      });
+      records.unshift(record);
+      render();
+      form.reset();
+      setStatus('Uploaded ' + record.fileName + '.');
+    } catch (err) {
+      setStatus('Upload failed: ' + (err && err.message ? err.message : err));
+    } finally {
+      submitBtn.disabled = false;
+    }
+  }
+
+  async function handleListClick(e) {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const record = records.find((r) => r.id === id);
+    if (!record) return;
+
+    if (btn.dataset.action === 'delete') {
+      btn.disabled = true;
+      try {
+        await runServer('deleteUpload', id);
+        records = records.filter((r) => r.id !== id);
+        render();
+      } catch (err) {
+        setStatus('Delete failed: ' + (err && err.message ? err.message : err));
+        btn.disabled = false;
+      }
+    } else if (btn.dataset.action === 'copy') {
+      try {
+        await navigator.clipboard.writeText(record.imageDataUrl || '');
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Copy Data URL'; }, 1200);
+      } catch (err) {
+        console.warn('Clipboard write failed', err);
+      }
+    }
+  }
+
+  let filterDebounce = null;
+  function handleFilterInput() {
+    clearTimeout(filterDebounce);
+    filterDebounce = setTimeout(() => loadAll(currentFilter()), 300);
+  }
+
+  // Exposed for same-origin JS/extension access: no fetch, no CORS,
+  // just read image bytes straight out of already-rendered page state.
+  window.appmakerUploads = {
+    ready: readyPromise,
+    getAll: () => records.slice(),
+    getById: (id) => records.find((r) => r.id === id) || null,
+    refresh: () => loadAll(currentFilter()),
+  };
+
+  document.getElementById('uploadForm').addEventListener('submit', handleSubmit);
+  document.getElementById('list').addEventListener('click', handleListClick);
+  document.getElementById('filterPageId').addEventListener('input', handleFilterInput);
+  document.getElementById('filterBlockLabel').addEventListener('input', handleFilterInput);
+  document.getElementById('refreshBtn').addEventListener('click', () => loadAll(currentFilter()));
+
+  document.getElementById('filterPageId').value = INITIAL_FILTER.pageId || '';
+  document.getElementById('filterBlockLabel').value = INITIAL_FILTER.blockLabel || '';
+  loadAll(currentFilter()).then((rs) => readyResolve(rs));
+})();
+</script>
+</body>
+</html>

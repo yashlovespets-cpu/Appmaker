@@ -1,40 +1,52 @@
-# Appmaker Image Intake Form
+# Appmaker Image Intake
 
-A single self-contained HTML page for staging images before they get pushed
+A tiny Google Apps Script web app for staging images before they get pushed
 into Appmaker. Fill in **Page ID**, **Block Label**, and pick an image file —
-the page reads the file locally and stores it as a `data:` URL in the
-browser's IndexedDB, then renders it straight into the DOM.
+the file is uploaded to a Drive folder, its metadata goes in a companion
+Sheet, and the page renders every upload back out as a `data:` URL so it's
+readable straight off the DOM.
 
-No backend, no external requests, no build step.
+Because storage is server-side (Drive + Sheets), uploads are shared across
+every browser/device that opens the deployed URL — unlike a purely
+client-side (IndexedDB) version, which is scoped to one browser profile.
 
-## Why data URLs
+## Files
 
-The whole point of this page is to make the uploaded image readable by
-same-origin JavaScript with zero friction. If you instead uploaded the image
-to some other host and pointed an `<img>` tag at it, reading the raw bytes
-back out via JS (`fetch` + `blob`, canvas `toDataURL`, etc.) would depend on
-that host's CORS headers. A `data:` URL has no origin at all — it's just text
-sitting in the page — so anything with JS access to this tab (including a
-browser extension driving the page) can read it directly, with no CORS check
-possible.
+- `Code.gs` — server logic: `doGet`, `submitUpload`, `listUploads`, `deleteUpload`.
+- `Index.html` — the form + upload list UI, calling the server via `google.script.run`.
+- `appsscript.json` — manifest; pre-sets the web app to run as the deploying
+  account and restrict access to your Workspace domain (see below).
 
-## Hosting it
+## Deploying
 
-Any static host works, since there's no server component:
+1. Go to [script.google.com](https://script.google.com), **New project**.
+2. Rename it (e.g. "Appmaker Image Intake"), delete the default `Code.gs`
+   stub content, and paste in this repo's `Code.gs`.
+3. Add an HTML file named `Index` (**File → New → HTML**) and paste in this
+   repo's `Index.html`.
+4. Open **Project Settings → Show "appsscript.json" manifest file in editor**,
+   then replace its contents with this repo's `appsscript.json`. This sets:
+   - `"executeAs": "USER_DEPLOYING"` — Drive/Sheets calls always run under
+     the account that deployed the script, so viewers don't need their own
+     access to the underlying folder/sheet.
+   - `"access": "DOMAIN"` — only people signed in with a Google account on
+     your Workspace domain (e.g. `@supertails.com`) can open the web app at
+     all. Google prompts them to sign in first.
+5. **Deploy → New deployment → Web app**. Confirm "Execute as: Me" and
+   "Who has access: Anyone within [your domain]" match the manifest (the UI
+   should preselect them). Deploy, and copy the web app URL
+   (`https://script.google.com/macros/s/XXXX/exec`).
+6. Open that URL — it'll ask you to sign in if you aren't already, then show
+   the form. The first successful upload auto-creates the `Appmaker Uploads`
+   Drive folder and its metadata Sheet (both discoverable in your Drive).
 
-- **GitHub Pages**: enable Pages for this repo pointed at `/upload-form`, or
-  copy `index.html` into a `docs/` folder if that's your Pages source.
-- **Local server**: `python3 -m http.server` from this directory, then open
-  `http://localhost:8000`.
-- **Netlify / Vercel / any static bucket**: drop `index.html` in and serve it.
-
-Avoid opening it via a bare `file://` URL if you can — IndexedDB behavior
-over `file://` is inconsistent across browsers. A trivial local static server
-is enough.
+If you'd rather deploy from the command line, this layout also works with
+[`clasp`](https://github.com/google/clasp) (`clasp create`, `clasp push`,
+`clasp deploy`) using the same three files.
 
 ## Data model
 
-Each upload is stored as:
+Each row in the Sheet / record returned by the server looks like:
 
 ```json
 {
@@ -44,42 +56,54 @@ Each upload is stored as:
   "fileName": "banner.png",
   "mimeType": "image/png",
   "byteLength": 123456,
-  "imageDataUrl": "data:image/png;base64,....",
-  "createdAt": "2026-07-16T12:00:00.000Z"
+  "driveFileId": "1AbCdEf...",
+  "createdAt": "2026-07-16T12:00:00.000Z",
+  "uploadedBy": "someone@supertails.com",
+  "imageDataUrl": "data:image/png;base64,...."
 }
 ```
 
-Storage is per-browser-profile (IndexedDB), not synced anywhere. Use the
-**Export JSON** button if you need a portable snapshot.
+`imageDataUrl` is only present in the payloads the client actually renders
+(`submitUpload`'s return value and each `listUploads` result) — it's fetched
+from Drive and base64-encoded on demand, not stored anywhere.
+
+Max image size is 20MB per upload (`MAX_IMAGE_BYTES` in `Code.gs`) — plenty
+for block images, comfortably under Apps Script's payload limits.
 
 ## Reading it back out (for the Chrome extension / automation)
 
-Two ways to grab the data once this page is open in a tab, both same-origin
-and CORS-free:
+Open the deployed URL in a tab (already-authenticated Chrome sessions won't
+even see the Google sign-in prompt), then read data straight out of the page
+— same-origin, no `fetch`, no CORS, because it's a `data:` URL:
 
-1. **DOM query** — each card is `<article class="upload-card" data-appmaker-upload
-   data-page-id="..." data-block-label="...">` and contains
-   `<img data-role="upload-image" src="data:...">`. Query for the card
-   matching the Page ID / Block Label you want, then read the `<img>`'s `src`
-   attribute directly — that's the full data URL, no fetch needed.
+1. **Wait for load**, since the list populates asynchronously after the page
+   loads: `await window.appmakerUploads.ready` (resolves once the initial
+   `listUploads` call returns).
 
-2. **JS API** — the page exposes `window.appmakerUploads`:
-   - `appmakerUploads.getAll()` → array of all stored records (including
-     `imageDataUrl`)
-   - `appmakerUploads.getById(id)` → single record
-   - `appmakerUploads.refresh()` → reload from IndexedDB
+2. **DOM query** — each card is
+   `<article class="upload-card" data-appmaker-upload data-page-id="..." data-block-label="...">`
+   containing `<img data-role="upload-image" src="data:...">`. Find the card
+   matching the Page ID / Block Label you want and read the `<img>`'s `src`.
 
-   e.g. from an extension content script or devtools-driven automation:
+3. **JS API** — `window.appmakerUploads.getAll()` / `.getById(id)` return the
+   full records (including `imageDataUrl`) already loaded into the page.
 
    ```js
+   await window.appmakerUploads.ready;
    const record = window.appmakerUploads
      .getAll()
      .find(r => r.pageId === "home" && r.blockLabel === "hero-banner");
    // record.imageDataUrl is ready to hand to Appmaker's upload field
    ```
 
-From there, convert the data URL to a `File`/`Blob` if the target upload
-field needs a real file object:
+4. **Direct-load via URL** — open
+   `.../exec?pageId=home&blockLabel=hero-banner` and the page pre-fills those
+   filters and loads only matching records before anything else, so there's
+   no need to search a long list. Filters are substring, case-insensitive
+   matches on each field.
+
+To turn a data URL into a real `File`/`Blob` for a `<input type="file">`
+target:
 
 ```js
 const res = await fetch(record.imageDataUrl); // fetch on a data: URL never hits CORS
@@ -89,8 +113,13 @@ const file = new File([blob], record.fileName, { type: record.mimeType });
 
 ## Limitations
 
-- Storage lives in one browser profile — it won't follow you across devices.
-- No auth: anyone with access to the page/browser can see and clear entries.
-- Intended as a staging/hand-off tool, not a permanent image store. Once an
-  upload has been pulled into Appmaker, delete it here (or periodically
-  **Clear All**) to keep IndexedDB from growing unbounded.
+- Access requires a Google account on the configured domain — there's no
+  separate app-level auth to manage, but it also means it can't be opened
+  by anyone outside that Workspace.
+- Every `listUploads` call re-reads matching files from Drive and
+  base64-encodes them on the fly; fine for a hand-fed intake tool with
+  dozens of images, but if the library grows very large, narrow with the
+  Page ID / Block Label filters (or the `?pageId=&blockLabel=` URL params)
+  rather than loading everything.
+- Deleting a record removes both the Sheet row and the Drive file — there's
+  no undo, so double-check before deleting.
