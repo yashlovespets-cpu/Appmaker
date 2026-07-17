@@ -10,12 +10,22 @@ Because storage is server-side (Drive + Sheets), uploads are shared across
 every browser/device that opens the deployed URL — unlike a purely
 client-side (IndexedDB) version, which is scoped to one browser profile.
 
+## Try it now
+
+`preview.html` is the same form and list UI, running standalone against this
+browser's IndexedDB instead of the Apps Script backend — nothing to deploy,
+open it and start staging images immediately. It's useful for trying the
+flow or previewing the design, but items you stage there only live in that
+one browser; they won't show up for anyone else until you're on the real
+deployment below.
+
 ## Files
 
 - `Code.gs` — server logic: `doGet`, `submitUpload`, `listUploads`, `deleteUpload`.
 - `Index.html` — the form + upload list UI, calling the server via `google.script.run`.
 - `appsscript.json` — manifest; pre-sets the web app to run as the deploying
   account and restrict access to your Workspace domain (see below).
+- `preview.html` — standalone local-storage demo of the same UI (see above).
 
 ## Deploying
 
